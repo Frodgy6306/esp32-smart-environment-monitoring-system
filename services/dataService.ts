@@ -18,7 +18,14 @@ export function getStoredRooms(): RoomConfig[] {
     return DEFAULT_ROOMS;
   }
   try {
-    return JSON.parse(stored);
+    const parsed = JSON.parse(stored) as RoomConfig[];
+    // Self-healing fix for users who might have the old broken URL in their localStorage
+    return parsed.map(room => {
+      if (room.id === 'room-01' && (room.csvUrl.includes('__') || room.csvUrl.includes('Fix'))) {
+        return DEFAULT_ROOMS[0];
+      }
+      return room;
+    });
   } catch {
     return DEFAULT_ROOMS;
   }
@@ -32,21 +39,29 @@ const SMOOTHING_WINDOW = 5;
 
 export async function fetchRoomData(room: RoomConfig): Promise<SensorData[]> {
   try {
-    const response = await fetch(room.csvUrl, { cache: 'no-store' });
+    const response = await fetch(room.csvUrl, { 
+      cache: 'no-store',
+      mode: 'cors'
+    });
+
     if (!response.ok) {
       console.warn(`Fetch failed for ${room.name}: ${response.status} ${response.statusText}`);
-      throw new Error('Network response was not ok');
+      throw new Error(`Network response was not ok (${response.status})`);
     }
+
     const csvText = await response.text();
     
     // Check if we actually got CSV content or an HTML error page from Google
-    if (csvText.toLowerCase().includes('<!doctype html>')) {
-      console.warn(`Received HTML instead of CSV for ${room.name}. Check if the sheet is "Published to web" as CSV.`);
-      throw new Error('Invalid data format received');
+    if (csvText.toLowerCase().trim().startsWith('<!doctype html>')) {
+      console.warn(`Received HTML instead of CSV for ${room.name}. This usually means the sheet is not "Published to the web" correctly as a CSV.`);
+      throw new Error('Invalid data format: received HTML instead of CSV');
     }
 
-    const lines = csvText.split('\n').filter(line => line.trim() !== '');
-    if (lines.length < 2) return generateMockData(room.id, true);
+    const lines = csvText.split(/\r?\n/).filter(line => line.trim() !== '');
+    if (lines.length < 2) {
+      console.warn(`CSV for ${room.name} has no data rows.`);
+      return generateMockData(room.id, true);
+    }
 
     const headers = lines[0].toLowerCase().split(',').map(h => h.trim());
     
@@ -61,8 +76,8 @@ export async function fetchRoomData(room: RoomConfig): Promise<SensorData[]> {
     const data: SensorData[] = lines.slice(1).map((line) => {
       const values = line.split(',').map(v => v.trim());
       
-      const getVal = (index: number, fallbackIdx: number) => {
-        if (index === -1) return 0;
+      const getVal = (index: number) => {
+        if (index === -1 || index >= values.length) return 0;
         const val = parseFloat(values[index]);
         return isNaN(val) ? 0 : val;
       };
@@ -70,28 +85,32 @@ export async function fetchRoomData(room: RoomConfig): Promise<SensorData[]> {
       const rawTime = idx.timestamp !== -1 ? values[idx.timestamp] : '';
       let dateObj = new Date(rawTime);
       
-      // If direct parsing fails, try to construct today's date if it's just a time string
-      if (isNaN(dateObj.getTime()) && rawTime.includes(':')) {
-        const today = new Date().toLocaleDateString();
-        dateObj = new Date(`${today} ${rawTime}`);
+      // Handle cases where date is just a time or badly formatted
+      if (isNaN(dateObj.getTime())) {
+        if (rawTime.includes(':')) {
+          const today = new Date().toLocaleDateString();
+          dateObj = new Date(`${today} ${rawTime}`);
+        } else {
+          dateObj = new Date();
+        }
       }
 
-      const isTimeValid = !isNaN(dateObj.getTime());
-
       return {
-        timestamp: isTimeValid ? dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'Invalid Time',
-        date: isTimeValid ? dateObj : new Date(),
-        temp: getVal(idx.temp, 1),
-        humidity: getVal(idx.humidity, 2),
-        toxicGas: getVal(idx.toxicGas, 3),
-        co2: getVal(idx.co2, 4),
+        timestamp: dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+        date: dateObj,
+        temp: getVal(idx.temp),
+        humidity: getVal(idx.humidity),
+        toxicGas: getVal(idx.toxicGas),
+        co2: getVal(idx.co2),
         isMock: false,
         roomId: room.id
       };
     });
 
-    data.sort((a, b) => a.date.getTime() - b.date.getTime());
-    return applySmoothing(data);
+    const validData = data.filter(d => !isNaN(d.date.getTime()));
+    validData.sort((a, b) => a.date.getTime() - b.date.getTime());
+    
+    return applySmoothing(validData);
   } catch (error) {
     console.error(`Error fetching data for ${room.name}:`, error);
     return generateMockData(room.id, true);
