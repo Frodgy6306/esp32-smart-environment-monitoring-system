@@ -1,0 +1,18 @@
+
+{
+  "name": "EcoGuard AI Monitor",
+  "short_name": "EcoGuard",
+  "description": "AI-Powered Environmental Monitoring System",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#4f46e5",
+  "icons": [
+    {
+      "src": "https://cdn-icons-png.flaticon.com/512/2092/2092063.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+{
+  "name": "EcoGuard AI Monitor",
+  "description": "An advanced environmental monitoring dashboard featuring real-time sensor data visualization, noise-filtered analytics, and AI-driven predictive hazard detection using Gemini.",
+  "requestFramePermissions": []
+}
