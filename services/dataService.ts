@@ -6,9 +6,9 @@ const STORAGE_KEY = 'ecoguard_rooms_config';
 const DEFAULT_ROOMS: RoomConfig[] = [
   {
     id: 'room-01',
-    name: 'Living Room',
-    csvUrl: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRFe6FgQmWF_JV3on_oAxAs_iZTd5ZLJRZEAhRd6HR4I4PwT1OuKr68vU_JbBsC5DUhiJ3YbH5EdE-y/pub?output=csv',
-    description: 'Main living area monitoring (ESP32-A)'
+    name: 'Main Monitor',
+    csvUrl: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRFe6FgQmWF_JV3on_oAxAs_iZTd5ZLJRZEAhRd6HR4I4PwT1OuKr68vU_JbBsC5DUhiJ3__/pub?output=csv',
+    description: 'Environmental monitoring node (ESP32)'
   }
 ];
 
@@ -99,8 +99,6 @@ function applySmoothing(data: SensorData[]): SensorData[] {
 
 function generateMockData(roomId: string, isFromFailure: boolean = false): SensorData[] {
   const now = new Date();
-  // If it's from a failure, we want to simulate old data to trigger the alert
-  // Shift mock data back by 2 hours so staleness detection hits immediately
   const offset = isFromFailure ? 120 * 60000 : 0; 
   
   return Array.from({ length: 40 }, (_, i) => {
