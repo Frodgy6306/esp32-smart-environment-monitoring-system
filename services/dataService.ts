@@ -38,7 +38,6 @@ export async function fetchRoomData(room: RoomConfig): Promise<SensorData[]> {
     const csvText = await response.text();
     
     const lines = csvText.split('\n').filter(line => line.trim() !== '');
-    // If only header exists, it's essentially an empty node
     if (lines.length < 2) return generateMockData(room.id, true);
 
     const headers = lines[0].toLowerCase().split(',').map(h => h.trim());
@@ -63,13 +62,11 @@ export async function fetchRoomData(room: RoomConfig): Promise<SensorData[]> {
 
       const rawTime = idx.timestamp !== -1 ? values[idx.timestamp] : '';
       let dateObj = new Date(rawTime);
-      // If timestamp is invalid, we mark it but we don't just use "new Date()" 
-      // because that masks downtime.
       const isTimeValid = !isNaN(dateObj.getTime());
 
       return {
         timestamp: isTimeValid ? dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'Invalid Time',
-        date: isTimeValid ? dateObj : new Date(0), // Use epoch for missing timestamps to trigger staleness
+        date: isTimeValid ? dateObj : new Date(0),
         temp: getVal(idx.temp, 1),
         humidity: getVal(idx.humidity, 2),
         toxicGas: getVal(idx.toxicGas, 3),
