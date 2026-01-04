@@ -32,10 +32,19 @@ const SMOOTHING_WINDOW = 5;
 
 export async function fetchRoomData(room: RoomConfig): Promise<SensorData[]> {
   try {
-    const response = await fetch(room.csvUrl);
-    if (!response.ok) throw new Error('Network response was not ok');
+    const response = await fetch(room.csvUrl, { cache: 'no-store' });
+    if (!response.ok) {
+      console.warn(`Fetch failed for ${room.name}: ${response.status} ${response.statusText}`);
+      throw new Error('Network response was not ok');
+    }
     const csvText = await response.text();
     
+    // Check if we actually got CSV content or an HTML error page from Google
+    if (csvText.toLowerCase().includes('<!doctype html>')) {
+      console.warn(`Received HTML instead of CSV for ${room.name}. Check if the sheet is "Published to web" as CSV.`);
+      throw new Error('Invalid data format received');
+    }
+
     const lines = csvText.split('\n').filter(line => line.trim() !== '');
     if (lines.length < 2) return generateMockData(room.id, true);
 
@@ -53,19 +62,25 @@ export async function fetchRoomData(room: RoomConfig): Promise<SensorData[]> {
       const values = line.split(',').map(v => v.trim());
       
       const getVal = (index: number, fallbackIdx: number) => {
-        const primary = index !== -1 ? parseFloat(values[index]) : NaN;
-        if (!isNaN(primary)) return primary;
-        const fallback = parseFloat(values[fallbackIdx]);
-        return isNaN(fallback) ? 0 : fallback;
+        if (index === -1) return 0;
+        const val = parseFloat(values[index]);
+        return isNaN(val) ? 0 : val;
       };
 
       const rawTime = idx.timestamp !== -1 ? values[idx.timestamp] : '';
       let dateObj = new Date(rawTime);
+      
+      // If direct parsing fails, try to construct today's date if it's just a time string
+      if (isNaN(dateObj.getTime()) && rawTime.includes(':')) {
+        const today = new Date().toLocaleDateString();
+        dateObj = new Date(`${today} ${rawTime}`);
+      }
+
       const isTimeValid = !isNaN(dateObj.getTime());
 
       return {
         timestamp: isTimeValid ? dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'Invalid Time',
-        date: isTimeValid ? dateObj : new Date(0),
+        date: isTimeValid ? dateObj : new Date(),
         temp: getVal(idx.temp, 1),
         humidity: getVal(idx.humidity, 2),
         toxicGas: getVal(idx.toxicGas, 3),
@@ -95,10 +110,10 @@ function applySmoothing(data: SensorData[]): SensorData[] {
 
 function generateMockData(roomId: string, isFromFailure: boolean = false): SensorData[] {
   const now = new Date();
-  const offset = isFromFailure ? 120 * 60000 : 0; 
+  const count = 40;
   
-  return Array.from({ length: 40 }, (_, i) => {
-    const d = new Date(now.getTime() - offset - (40 - i) * 60000);
+  return Array.from({ length: count }, (_, i) => {
+    const d = new Date(now.getTime() - (count - i) * 60000);
     return {
       timestamp: d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
       date: d,
@@ -106,7 +121,7 @@ function generateMockData(roomId: string, isFromFailure: boolean = false): Senso
       humidity: 45 + Math.random() * 10,
       toxicGas: 80 + Math.random() * 40,
       co2: 380 + Math.random() * 80,
-      isMock: true,
+      isMock: isFromFailure,
       roomId
     };
   });
