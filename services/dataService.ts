@@ -19,13 +19,17 @@ export function getStoredRooms(): RoomConfig[] {
   }
   try {
     const parsed = JSON.parse(stored) as RoomConfig[];
-    // Self-healing fix for users who might have the old broken URL in their localStorage
-    return parsed.map(room => {
-      if (room.id === 'room-01' && (room.csvUrl.includes('__') || room.csvUrl.includes('Fix'))) {
-        return DEFAULT_ROOMS[0];
+    
+    // Self-healing: Detect and fix common typos or broken URLs from previous versions
+    const fixed = parsed.map(room => {
+      // If the URL has common errors or is a known legacy broken version
+      if (room.id === 'room-01' && (room.csvUrl.includes('__') || !room.csvUrl.includes('pub?output=csv'))) {
+        return { ...room, csvUrl: DEFAULT_ROOMS[0].csvUrl };
       }
       return room;
     });
+    
+    return fixed;
   } catch {
     return DEFAULT_ROOMS;
   }
@@ -35,8 +39,6 @@ export function saveRooms(rooms: RoomConfig[]) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(rooms));
 }
 
-const SMOOTHING_WINDOW = 5;
-
 export async function fetchRoomData(room: RoomConfig): Promise<SensorData[]> {
   try {
     const response = await fetch(room.csvUrl, { 
@@ -45,101 +47,82 @@ export async function fetchRoomData(room: RoomConfig): Promise<SensorData[]> {
     });
 
     if (!response.ok) {
-      console.warn(`Fetch failed for ${room.name}: ${response.status} ${response.statusText}`);
-      throw new Error(`Network response was not ok (${response.status})`);
+      throw new Error(`HTTP Error ${response.status}`);
     }
 
     const csvText = await response.text();
     
-    // Check if we actually got CSV content or an HTML error page from Google
+    // Guard against Google Sheets returning an HTML login/error page instead of CSV
     if (csvText.toLowerCase().trim().startsWith('<!doctype html>')) {
-      console.warn(`Received HTML instead of CSV for ${room.name}. This usually means the sheet is not "Published to the web" correctly as a CSV.`);
-      throw new Error('Invalid data format: received HTML instead of CSV');
+      throw new Error('Received HTML instead of CSV. Ensure sheet is published to web as CSV.');
     }
 
     const lines = csvText.split(/\r?\n/).filter(line => line.trim() !== '');
     if (lines.length < 2) {
-      console.warn(`CSV for ${room.name} has no data rows.`);
       return generateMockData(room.id, true);
     }
 
     const headers = lines[0].toLowerCase().split(',').map(h => h.trim());
     
     const idx = {
-      timestamp: headers.findIndex(h => h.includes('time') || h.includes('date') || h.includes('timestamp')),
-      temp: headers.findIndex(h => (h.includes('temp') || h.includes('dht')) && !h.includes('gas')),
-      humidity: headers.findIndex(h => h.includes('hum') || h.includes('rh')),
-      toxicGas: headers.findIndex(h => h.includes('mq') || h.includes('toxic') || (h.includes('gas') && !h.includes('co2'))),
-      co2: headers.findIndex(h => h.includes('co2') || h.includes('mg') || h.includes('811'))
+      timestamp: headers.findIndex(h => h.includes('time') || h.includes('date')),
+      temp: headers.findIndex(h => h.includes('temp') || h.includes('dht')),
+      humidity: headers.findIndex(h => h.includes('hum')),
+      toxicGas: headers.findIndex(h => h.includes('mq') || h.includes('toxic')),
+      co2: headers.findIndex(h => h.includes('co2') || h.includes('mg'))
     };
 
     const data: SensorData[] = lines.slice(1).map((line) => {
       const values = line.split(',').map(v => v.trim());
       
-      const getVal = (index: number) => {
-        if (index === -1 || index >= values.length) return 0;
+      const parseNum = (index: number, fallback = 0) => {
+        if (index === -1 || index >= values.length) return fallback;
         const val = parseFloat(values[index]);
-        return isNaN(val) ? 0 : val;
+        return isNaN(val) ? fallback : val;
       };
 
       const rawTime = idx.timestamp !== -1 ? values[idx.timestamp] : '';
       let dateObj = new Date(rawTime);
       
-      // Handle cases where date is just a time or badly formatted
       if (isNaN(dateObj.getTime())) {
-        if (rawTime.includes(':')) {
-          const today = new Date().toLocaleDateString();
-          dateObj = new Date(`${today} ${rawTime}`);
-        } else {
-          dateObj = new Date();
-        }
+        dateObj = new Date();
       }
 
       return {
         timestamp: dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
         date: dateObj,
-        temp: getVal(idx.temp),
-        humidity: getVal(idx.humidity),
-        toxicGas: getVal(idx.toxicGas),
-        co2: getVal(idx.co2),
+        temp: parseNum(idx.temp),
+        humidity: parseNum(idx.humidity),
+        toxicGas: parseNum(idx.toxicGas),
+        co2: parseNum(idx.co2),
         isMock: false,
         roomId: room.id
       };
     });
 
-    const validData = data.filter(d => !isNaN(d.date.getTime()));
-    validData.sort((a, b) => a.date.getTime() - b.date.getTime());
-    
-    return applySmoothing(validData);
+    // Sort by time and ensure we don't have empty readings
+    return data
+      .filter(d => !isNaN(d.date.getTime()))
+      .sort((a, b) => a.date.getTime() - b.date.getTime());
+
   } catch (error) {
-    console.error(`Error fetching data for ${room.name}:`, error);
+    console.warn(`Fetch failed for ${room.name}, using mock data.`, error);
     return generateMockData(room.id, true);
   }
 }
 
-function applySmoothing(data: SensorData[]): SensorData[] {
-  return data.map((item, idx, arr) => {
-    if (idx < SMOOTHING_WINDOW) return item;
-    const slice = arr.slice(idx - SMOOTHING_WINDOW + 1, idx + 1);
-    const avgGas = slice.reduce((sum, d) => sum + d.toxicGas, 0) / SMOOTHING_WINDOW;
-    const avgCo2 = slice.reduce((sum, d) => sum + d.co2, 0) / SMOOTHING_WINDOW;
-    return { ...item, toxicGas: Number(avgGas.toFixed(2)), co2: Number(avgCo2.toFixed(2)) };
-  });
-}
-
-function generateMockData(roomId: string, isFromFailure: boolean = false): SensorData[] {
+function generateMockData(roomId: string, isFromFailure = false): SensorData[] {
   const now = new Date();
-  const count = 40;
-  
+  const count = 30;
   return Array.from({ length: count }, (_, i) => {
     const d = new Date(now.getTime() - (count - i) * 60000);
     return {
       timestamp: d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
       date: d,
-      temp: 22 + Math.random() * 5,
-      humidity: 45 + Math.random() * 10,
-      toxicGas: 80 + Math.random() * 40,
-      co2: 380 + Math.random() * 80,
+      temp: 20 + Math.random() * 10,
+      humidity: 40 + Math.random() * 20,
+      toxicGas: 50 + Math.random() * 100,
+      co2: 400 + Math.random() * 200,
       isMock: isFromFailure,
       roomId
     };

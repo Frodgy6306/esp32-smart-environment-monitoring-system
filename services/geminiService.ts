@@ -1,39 +1,34 @@
-
 import { GoogleGenAI, Type } from "@google/genai";
 import { SensorData, AIInsight } from "../types";
 
 export async function analyzeTrends(recentData: SensorData[], isStale: boolean, ageMinutes: number): Promise<AIInsight> {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  // Always initialize fresh to ensure latest environment variables/keys
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
 
   const dataSummary = recentData.map(d => ({
-    g: d.toxicGas,
-    c: d.co2,
-    t: d.temp,
-    m: d.isMock
+    temp: d.temp,
+    hum: d.humidity,
+    gas: d.toxicGas,
+    co2: d.co2,
+    timestamp: d.timestamp
   }));
 
-  const systemInstruction = `You are the EcoGuard AI Core. You have a built-in real-time clock monitoring sensor pulses.
-  When data is delayed, you must notice the exact 'Data Age' and comment on it in your thought process. 
-  Your personality is inquisitive: "Why has the sensor been quiet for ${ageMinutes} minutes?"
-  Provide a technical, engineer-focused diagnosis when signal is lost.`;
+  const systemInstruction = `You are the EcoGuard AI Core, a highly sophisticated environmental monitoring agent.
+Your primary task is to analyze sensor telemetry from ESP32 nodes. 
+Be precise, technical, and alert. If data is stale, prioritize diagnosing why the node heartbeat is missing.
+You must return your analysis in valid JSON format matching the requested schema.`;
 
   const prompt = isStale 
-    ? `HEARTBEAT FAILURE: My internal clock indicates that the sensor pulse for this room is ${ageMinutes} minutes overdue. 
-       
-       Think to yourself: "Wait, I am looking at the dashboard clock and I haven't seen an update in ${ageMinutes} minutes. The ESP32 node should be pulsing every 30 seconds."
-       
-       Provide a 'DANGER' diagnosis explaining to the user that the connection is broken. 
-       Check the last known state: ${JSON.stringify(dataSummary[dataSummary.length-1])}.
-       Suggest checking power, Wi-Fi, or if the Google Sheet publishing has been disabled.`
-    : `Analyzing fresh data stream. The node is pulsing normally.
-       Data Summary: ${JSON.stringify(dataSummary)}
-       
-       Provide a safety report. If clean, reassure the user that the connection is healthy.`;
+    ? `CRITICAL ALERT: Communication heartbeat lost. The sensor data is ${ageMinutes} minutes old. 
+       Last recorded state: ${JSON.stringify(dataSummary[dataSummary.length-1])}.
+       Analyze this failure. Suggest hardware checks (Power, Wi-Fi, Sensor connection) and warn about the lack of visibility.`
+    : `Analyzing real-time telemetry stream: ${JSON.stringify(dataSummary)}.
+       Evaluate air quality and environmental stability. If levels are safe, provide a reassuring diagnostic. If rising, warn of potential hazards.`;
 
   try {
     const response = await ai.models.generateContent({
       model: 'gemini-3-flash-preview',
-      contents: prompt,
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
       config: {
         systemInstruction,
         responseMimeType: "application/json",
@@ -45,18 +40,20 @@ export async function analyzeTrends(recentData: SensorData[], isStale: boolean, 
               enum: ['SAFE', 'WARNING', 'DANGER']
             },
             prediction: { 
-              type: Type.STRING 
+              type: Type.STRING,
+              description: "Brief summary of the environmental state or hazard."
             },
             thoughtProcess: {
               type: Type.STRING,
-              description: "Your internal monologue noticing the clock and analyzing the signal gap."
+              description: "Internal monologue reflecting on the data gaps or trends."
             },
             trend: { 
               type: Type.STRING, 
               enum: ['STABLE', 'RISING', 'FALLING']
             },
             confidence: { 
-              type: Type.NUMBER 
+              type: Type.NUMBER,
+              description: "Confidence in the analysis from 0 to 1."
             }
           },
           required: ["status", "prediction", "trend", "confidence", "thoughtProcess"]
@@ -64,17 +61,20 @@ export async function analyzeTrends(recentData: SensorData[], isStale: boolean, 
       }
     });
 
-    const resultText = response.text;
-    if (!resultText) throw new Error("Empty response");
-
-    return JSON.parse(resultText.trim()) as AIInsight;
-  } catch (error: any) {
-    console.error("Gemini Analysis failed:", error);
+    const result = response.text;
+    if (!result) throw new Error("No response from AI");
     
+    return JSON.parse(result.trim()) as AIInsight;
+  } catch (error) {
+    console.error("Gemini Analysis Failure:", error);
+    
+    // Fallback insight in case of API failure
     return {
       status: isStale ? 'DANGER' : 'SAFE',
-      prediction: "Connection interrupt detected. Pulse clock has exceeded 5 minutes.",
-      thoughtProcess: "Signal lost. The data age is climbing and I cannot verify current conditions.",
+      prediction: isStale 
+        ? "Monitoring suspended. Link heartbeat exceeded timeout threshold." 
+        : "Automated analysis offline. Manual monitoring required.",
+      thoughtProcess: "API connection error. Defaulting to fail-safe safety protocols.",
       trend: 'STABLE',
       confidence: 0
     };

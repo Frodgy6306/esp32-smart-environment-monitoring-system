@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { fetchRoomData, getStoredRooms, saveRooms } from './services/dataService';
 import { analyzeTrends } from './services/geminiService';
@@ -11,11 +10,11 @@ import AIInsightsPanel from './components/AIInsightsPanel';
 import AlertHistory from './components/AlertHistory';
 import SensorsConfig from './components/SensorsConfig';
 import AnalyticsView from './components/AnalyticsView';
-import { AlertCircle, Wind, Thermometer, Droplets, Activity, MapPin, WifiOff, Clock, Lock, Unlock } from 'lucide-react';
+import { AlertCircle, Wind, Thermometer, Droplets, Activity, WifiOff, Clock } from 'lucide-react';
 
-const DATA_FETCH_INTERVAL = 30000; 
-const AI_ANALYZE_INTERVAL = 300000;
-const STALE_THRESHOLD_MINUTES = 5;
+const FETCH_INTERVAL = 30000; 
+const AI_INTERVAL = 300000; // 5 minutes
+const STALE_MINUTES = 5;
 
 const App: React.FC = () => {
   const [rooms, setRooms] = useState<RoomConfig[]>(getStoredRooms());
@@ -27,87 +26,44 @@ const App: React.FC = () => {
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
   const [currentTime, setCurrentTime] = useState<Date>(new Date());
-  const [isLocked, setIsLocked] = useState<boolean>(() => {
-    return localStorage.getItem('ecoguard_locked') === 'true';
-  });
+  const [isLocked, setIsLocked] = useState<boolean>(() => localStorage.getItem('ecoguard_locked') === 'true');
   
   const lastAiUpdateTimes = useRef<Record<string, number>>({});
-  const isInitialMount = useRef(true);
 
-  const toggleLock = () => {
-    const newState = !isLocked;
-    setIsLocked(newState);
-    localStorage.setItem('ecoguard_locked', String(newState));
-  };
+  const activeRoom = useMemo(() => rooms.find(r => r.id === activeRoomId) || rooms[0], [activeRoomId, rooms]);
 
-  const handleAddRoom = useCallback((room: RoomConfig) => {
-    if (isLocked) return;
-    setRooms(prev => {
-      const updated = [...prev, room];
-      saveRooms(updated);
-      return updated;
-    });
-    if (rooms.length === 0) {
-      setActiveRoomId(room.id);
-    }
-  }, [isLocked, rooms.length]);
-
-  const handleDeleteRoom = useCallback((id: string) => {
-    if (isLocked) return;
-    setRooms(prev => {
-      const updated = prev.filter(r => r.id !== id);
-      saveRooms(updated);
-      return updated;
-    });
-    if (activeRoomId === id) {
-      const remaining = rooms.filter(r => r.id !== id);
-      setActiveRoomId(remaining[0]?.id || '');
-    }
-  }, [activeRoomId, isLocked, rooms]);
-
-  const activeRoom = useMemo(() => 
-    rooms.find(r => r.id === activeRoomId) || rooms[0], 
-  [activeRoomId, rooms]);
-
-  const refreshAllRooms = useCallback(async (forceAi = false) => {
+  const refreshData = useCallback(async (forceAi = false) => {
     if (rooms.length === 0) {
       setIsLoading(false);
       return;
     }
     
     setIsLoading(true);
-    const newData: Record<string, SensorData[]> = { ...allData };
-    const newInsights: Record<string, AIInsight | null> = { ...allInsights };
+    const newData = { ...allData };
+    const newInsights = { ...allInsights };
     const now = Date.now();
 
     for (const room of rooms) {
-      const roomData = await fetchRoomData(room);
-      newData[room.id] = roomData;
+      try {
+        const roomData = await fetchRoomData(room);
+        newData[room.id] = roomData;
 
-      const lastReading = roomData[roomData.length - 1];
-      const ageMinutes = lastReading ? (now - lastReading.date.getTime()) / 60000 : 999;
-      const isStale = ageMinutes >= STALE_THRESHOLD_MINUTES || lastReading?.isMock === true;
+        const lastReading = roomData[roomData.length - 1];
+        const ageMin = lastReading ? (now - lastReading.date.getTime()) / 60000 : 999;
+        const isStale = ageMin >= STALE_MINUTES || lastReading?.isMock;
 
-      const lastAi = lastAiUpdateTimes.current[room.id] || 0;
-      const isDue = (now - lastAi) >= AI_ANALYZE_INTERVAL;
-      
-      const currentlyToldDown = allInsights[room.id]?.thoughtProcess?.toLowerCase().includes("reached") || 
-                                allInsights[room.id]?.prediction?.toLowerCase().includes("down");
-
-      const shouldRunAi = (forceAi && room.id === activeRoomId) || 
-                         (isDue && roomData.length > 5) || 
-                         (isStale && !currentlyToldDown);
-
-      if (shouldRunAi && !isAiLoading) {
-        setIsAiLoading(true);
-        try {
-          const result = await analyzeTrends(roomData.slice(-10), isStale, Math.round(ageMinutes));
+        const lastAiTime = lastAiUpdateTimes.current[room.id] || 0;
+        const isAiDue = (now - lastAiTime) >= AI_INTERVAL;
+        
+        if ((forceAi && room.id === activeRoomId) || (isAiDue && roomData.length > 0)) {
+          setIsAiLoading(true);
+          const result = await analyzeTrends(roomData.slice(-15), isStale, Math.round(ageMin));
           newInsights[room.id] = result;
           lastAiUpdateTimes.current[room.id] = now;
-        } catch (e) {
-          console.error(`AI failed for ${room.name}`, e);
+          setIsAiLoading(false);
         }
-        setIsAiLoading(false);
+      } catch (err) {
+        console.error(`Error processing room ${room.name}:`, err);
       }
     }
 
@@ -115,46 +71,26 @@ const App: React.FC = () => {
     setAllInsights(newInsights);
     setLastUpdate(new Date());
     setIsLoading(false);
-  }, [activeRoomId, allData, allInsights, isAiLoading, rooms]);
+  }, [activeRoomId, allData, allInsights, rooms]);
 
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
-    return () => clearInterval(timer);
-  }, []);
+    refreshData(true);
+    const dataInterval = setInterval(() => refreshData(false), FETCH_INTERVAL);
+    return () => {
+      clearInterval(timer);
+      clearInterval(dataInterval);
+    };
+  }, [refreshData]);
 
-  useEffect(() => {
-    if (isInitialMount.current) {
-      refreshAllRooms(true);
-      isInitialMount.current = false;
-    }
-    const interval = setInterval(() => refreshAllRooms(false), DATA_FETCH_INTERVAL);
-    return () => clearInterval(interval);
-  }, [refreshAllRooms]);
-
-  const activeData = useMemo(() => {
-    return allData[activeRoomId] || [];
-  }, [allData, activeRoomId]);
-
-  const chartData = useMemo(() => activeData.slice(-40), [activeData]);
-
+  const activeData = allData[activeRoomId] || [];
   const current: SensorData = activeData[activeData.length - 1] || { 
-    timestamp: '--:--:--',
-    date: new Date(0),
-    temp: 0, 
-    humidity: 0, 
-    toxicGas: 0, 
-    co2: 0, 
-    roomId: activeRoomId 
+    timestamp: '--:--:--', date: new Date(0), temp: 0, humidity: 0, toxicGas: 0, co2: 0, roomId: activeRoomId 
   };
 
   const ageSeconds = Math.floor((currentTime.getTime() - current.date.getTime()) / 1000);
-  const isSystemDown = (current.date.getTime() === 0 || ageSeconds / 60 >= STALE_THRESHOLD_MINUTES) || current.isMock;
+  const isSystemDown = ageSeconds / 60 >= STALE_MINUTES || current.isMock;
   const insight = allInsights[activeRoomId] || null;
-
-  const nextUpdateRemaining = useMemo(() => {
-    const last = lastAiUpdateTimes.current[activeRoomId] || Date.now() - AI_ANALYZE_INTERVAL;
-    return Math.max(0, Math.ceil((AI_ANALYZE_INTERVAL - (Date.now() - last)) / 1000));
-  }, [activeRoomId, currentTime]);
 
   return (
     <div className="flex h-screen overflow-hidden bg-slate-950 text-slate-100">
@@ -167,41 +103,71 @@ const App: React.FC = () => {
         roomInsights={allInsights}
         rooms={rooms}
         isLocked={isLocked}
-        toggleLock={toggleLock}
+        toggleLock={() => {
+          const s = !isLocked;
+          setIsLocked(s);
+          localStorage.setItem('ecoguard_locked', String(s));
+        }}
       />
-      <main className="flex-1 flex flex-col overflow-y-auto">
+      
+      <main className="flex-1 flex flex-col overflow-y-auto relative">
         <Header 
           lastUpdate={lastUpdate} 
           lastDataTimestamp={current.date}
-          onRefresh={() => refreshAllRooms(true)} 
+          onRefresh={() => refreshData(true)} 
           isLoading={isLoading || isAiLoading}
-          roomName={activeRoom?.name || 'No Room Selected'}
+          roomName={activeRoom?.name || 'Sensors'}
           isSystemDown={isSystemDown}
           isLocked={isLocked}
         />
-        <div className="p-6 max-w-7xl mx-auto w-full">
-          {activeTab === 'dashboard' && rooms.length > 0 && isSystemDown && (
-            <div className="mb-6 bg-red-950/40 border-2 border-red-500 p-8 rounded-3xl flex flex-col md:flex-row items-center gap-8 animate-pulse shadow-2xl shadow-red-500/20 relative overflow-hidden">
-               <div className="absolute top-0 right-0 p-4 opacity-10">
-                 <Clock size={120} />
-               </div>
-              <div className="w-20 h-20 bg-red-600 rounded-full flex items-center justify-center shrink-0 border-4 border-red-400/50">
-                <WifiOff className="text-white" size={40} />
+
+        <div className="p-4 md:p-8 max-w-7xl mx-auto w-full space-y-6">
+          {activeTab === 'dashboard' && isSystemDown && rooms.length > 0 && (
+            <div className="bg-red-950/20 border border-red-500/50 p-6 rounded-3xl flex flex-col md:flex-row items-center gap-6 animate-pulse">
+              <div className="w-16 h-16 bg-red-600 rounded-2xl flex items-center justify-center shrink-0 shadow-lg shadow-red-500/20">
+                <WifiOff className="text-white" size={32} />
               </div>
-              <div className="flex-1 text-center md:text-left">
-                <div className="flex flex-col md:flex-row items-center gap-3 mb-2">
-                  <span className="bg-white text-red-600 text-[12px] font-black px-3 py-1 rounded tracking-tighter uppercase">Heartbeat Lost</span>
-                  <h3 className="text-2xl font-black text-white">System Stasis: {Math.floor(ageSeconds / 60)}m {ageSeconds % 60}s Silence</h3>
-                </div>
-                <p className="text-red-100 text-lg leading-relaxed max-w-2xl">
-                  {current.isMock 
-                    ? `FATAL: The ESP32 data stream for ${activeRoom.name} has vanished. My internal clock has surpassed the 5-minute safety threshold. Please check the hardware immediately.`
-                    : `CRITICAL: Communication severed. The node was last seen at ${current.timestamp}. AI diagnostic core is now locked onto this failure event.`
-                  }
+              <div className="text-center md:text-left space-y-1">
+                <h3 className="text-xl font-bold text-white uppercase tracking-tighter">Node Heartbeat Lost</h3>
+                <p className="text-red-200/70 text-sm max-w-xl">
+                  Communication with <strong>{activeRoom.name}</strong> was interrupted {Math.floor(ageSeconds / 60)}m ago. AI analysis is currently restricted to last-known-state diagnostics.
                 </p>
-                <div className="mt-4 flex gap-4 justify-center md:justify-start">
-                   <button onClick={() => refreshAllRooms(true)} className="bg-white text-red-600 px-6 py-2 rounded-xl font-bold hover:bg-red-50 transition-colors">Force Resync</button>
-                   <button onClick={() => setActiveTab('config')} className="bg-red-800/50 text-white border border-red-400/30 px-6 py-2 rounded-xl font-bold">Check Node Config</button>
+              </div>
+              <button 
+                onClick={() => refreshData(true)}
+                className="ml-auto bg-red-600 hover:bg-red-500 text-white px-6 py-2 rounded-xl font-bold transition-all active:scale-95"
+              >
+                Sync Link
+              </button>
+            </div>
+          )}
+
+          {activeTab === 'dashboard' && rooms.length > 0 && (
+            <div className="space-y-6">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <StatCard title="Temperature" value={isSystemDown ? '--' : `${current.temp.toFixed(1)}°C`} icon={<Thermometer className="text-orange-400" />} trend={current.temp > 30 ? 'high' : 'normal'} color="border-orange-500/20" />
+                <StatCard title="Humidity" value={isSystemDown ? '--' : `${current.humidity.toFixed(1)}%`} icon={<Droplets className="text-blue-400" />} trend={current.humidity > 70 ? 'high' : 'normal'} color="border-blue-500/20" />
+                <StatCard title="Gas (MQ2)" value={isSystemDown ? '--' : current.toxicGas.toFixed(0)} icon={<Wind className="text-emerald-400" />} trend={current.toxicGas > 300 ? 'high' : 'normal'} color="border-emerald-500/20" unit="ppm" />
+                <StatCard title="CO2 (MG811)" value={isSystemDown ? '--' : current.co2.toFixed(0)} icon={<Activity className="text-purple-400" />} trend={current.co2 > 1000 ? 'high' : 'normal'} color="border-purple-500/20" unit="ppm" />
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <div className="lg:col-span-2 space-y-6">
+                  <div className="bg-slate-900/50 border border-slate-800 rounded-3xl p-6 h-[400px]">
+                    <div className="flex items-center justify-between mb-6">
+                      <h3 className="text-xs font-bold uppercase tracking-widest text-slate-500 flex items-center gap-2">
+                        <Activity size={14} /> Telemetry Stream
+                      </h3>
+                      <div className="flex gap-2">
+                         <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                         <span className="text-[10px] text-slate-400 font-bold uppercase">Real-time</span>
+                      </div>
+                    </div>
+                    <EnvironmentalChart data={activeData.slice(-30)} types={['temp', 'humidity', 'toxicGas', 'co2']} />
+                  </div>
+                </div>
+                <div className="lg:col-span-1">
+                  <AIInsightsPanel insight={insight} isSystemDown={isSystemDown} nextUpdateIn={0} currentData={current} />
                 </div>
               </div>
             </div>
@@ -211,68 +177,37 @@ const App: React.FC = () => {
           {activeTab === 'config' && (
             <SensorsConfig 
               rooms={rooms} 
-              onAddRoom={handleAddRoom} 
-              onDeleteRoom={handleDeleteRoom} 
+              onAddRoom={(r) => {
+                const updated = [...rooms, r];
+                setRooms(updated);
+                saveRooms(updated);
+                setActiveRoomId(r.id);
+              }} 
+              onDeleteRoom={(id) => {
+                const updated = rooms.filter(r => r.id !== id);
+                setRooms(updated);
+                saveRooms(updated);
+                if (activeRoomId === id) setActiveRoomId(updated[0]?.id || '');
+              }} 
               isLocked={isLocked}
             />
           )}
           {activeTab === 'analytics' && <AnalyticsView data={activeData} insight={insight} />}
           
-          {activeTab === 'dashboard' && (
-            rooms.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-24 text-center space-y-4">
-                <div className="w-16 h-16 bg-slate-900 rounded-full flex items-center justify-center">
-                  <MapPin size={32} className="text-slate-600" />
-                </div>
-                <h2 className="text-xl font-bold">No Rooms Monitor Registered</h2>
-                <p className="text-slate-500 max-w-md">Head over to the Config tab to register your first ESP32 node and start monitoring.</p>
-                <button onClick={() => setActiveTab('config')} className="bg-indigo-600 px-6 py-2 rounded-lg font-bold">Configure Nodes</button>
-              </div>
-            ) : (
-              <div className="space-y-6">
-                {!isSystemDown && (insight?.status === 'DANGER' || current.toxicGas > 400 || current.co2 > 1000) && (
-                  <div className="bg-red-500/10 border border-red-500/50 p-4 rounded-xl flex items-center gap-4 animate-in slide-in-from-top duration-300">
-                    <AlertCircle className="text-red-500 h-8 w-8" />
-                    <div>
-                      <h3 className="font-bold text-red-500">Hazard in {activeRoom.name}</h3>
-                      <p className="text-red-400/80 text-sm">{insight?.prediction || 'Threshold exceeded'}</p>
-                    </div>
-                  </div>
-                )}
-
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                  <StatCard title="Temp" value={isSystemDown ? '--' : `${current.temp.toFixed(1)}°C`} icon={<Thermometer className="text-orange-400" />} trend={current.temp > 32 ? 'high' : 'normal'} color={isSystemDown ? "border-slate-800" : "border-orange-500/30"} />
-                  <StatCard title="Humidity" value={isSystemDown ? '--' : `${current.humidity.toFixed(1)}%`} icon={<Droplets className="text-blue-400" />} trend={current.humidity > 70 ? 'high' : 'normal'} color={isSystemDown ? "border-slate-800" : "border-blue-500/30"} />
-                  <StatCard title="Gas (MQ2)" value={isSystemDown ? '--' : current.toxicGas.toFixed(0)} icon={<Wind className="text-emerald-400" />} trend={current.toxicGas > 300 ? 'high' : 'normal'} color={isSystemDown ? "border-slate-800" : "border-emerald-500/30"} unit={isSystemDown ? "" : "ppm"} />
-                  <StatCard title="CO2 (MG811)" value={isSystemDown ? '--' : current.co2.toFixed(0)} icon={<Activity className="text-purple-400" />} trend={current.co2 > 1000 ? 'high' : 'normal'} color={isSystemDown ? "border-slate-800" : "border-purple-500/30"} unit={isSystemDown ? "" : "ppm"} />
-                </div>
-
-                <div className="grid grid-cols-1 xl:grid-cols-4 gap-6">
-                  <div className="xl:col-span-3 grid grid-cols-1 md:grid-cols-2 gap-6">
-                    <ChartCard title="Temperature" icon={<Thermometer size={14} />}><EnvironmentalChart data={chartData} types={['temp']} /></ChartCard>
-                    <ChartCard title="Humidity" icon={<Droplets size={14} />}><EnvironmentalChart data={chartData} types={['humidity']} /></ChartCard>
-                    <ChartCard title="Toxic Gas" icon={<Wind size={14} />}><EnvironmentalChart data={chartData} types={['toxicGas']} /></ChartCard>
-                    <ChartCard title="CO2 Level" icon={<Activity size={14} />}><EnvironmentalChart data={chartData} types={['co2']} /></ChartCard>
-                  </div>
-                  <div className="xl:col-span-1">
-                    <AIInsightsPanel insight={insight} currentData={current} nextUpdateIn={nextUpdateRemaining} isSystemDown={isSystemDown} />
-                  </div>
-                </div>
-              </div>
-            )
+          {rooms.length === 0 && (
+            <div className="flex flex-col items-center justify-center py-32 text-center">
+               <div className="w-20 h-20 bg-slate-900 rounded-full flex items-center justify-center mb-6">
+                 <Clock size={40} className="text-slate-600" />
+               </div>
+               <h2 className="text-2xl font-bold mb-2">No Nodes Configured</h2>
+               <p className="text-slate-500 max-w-md mb-8">Ready to start monitoring? Register your ESP32 environmental node in the Config section.</p>
+               <button onClick={() => setActiveTab('config')} className="bg-indigo-600 hover:bg-indigo-500 px-8 py-3 rounded-2xl font-bold transition-all shadow-xl shadow-indigo-600/20">Go to Configuration</button>
+            </div>
           )}
         </div>
       </main>
     </div>
   );
 };
-
-const ChartCard: React.FC<{ title: string; icon: React.ReactNode; children: React.ReactNode }> = ({ title, icon, children }) => (
-  <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-5 flex flex-col min-h-[250px]">
-    <h3 className="text-[10px] font-bold mb-4 flex items-center gap-2 text-slate-500 uppercase tracking-widest">{icon}{title}</h3>
-    <div className="flex-1">{children}</div>
-    <div className="mt-2 text-[9px] text-slate-600 text-right uppercase font-bold tracking-tighter">Window: Last 40 Pulses</div>
-  </div>
-);
 
 export default App;
