@@ -1,4 +1,3 @@
-
 import { SensorData, RoomConfig } from '../types';
 
 const STORAGE_KEY = 'ecoguard_rooms_config';
@@ -7,7 +6,7 @@ const DEFAULT_ROOMS: RoomConfig[] = [
   {
     id: 'room-01',
     name: 'Main Monitor',
-    csvUrl: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRFe6FgQmWF_JV3on_oAxAs_iZTd5ZLJRZEAhRd6HR4I4PwT1OuKr68vU_JbBsC5DUhiJ3__/pub?output=csv',
+    csvUrl: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRFe6FgQmWF_JV3on_oAxAs_iZTd5ZLJRZEAhRd6HR4I4PwT1OuKr68vU_JbBsC5DUhiJ3/pub?output=csv',
     description: 'Environmental monitoring node (ESP32)'
   }
 ];
